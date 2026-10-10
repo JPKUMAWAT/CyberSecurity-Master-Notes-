@@ -1,0 +1,690 @@
+# 📌 Server-Side Template Injection (SSTI) — Complete Bug Bounty Notes
+
+> [!abstract] Quick Overview
+> - **Vulnerability:** Server-Side Template Injection (SSTI)
+> - **CWE:** [CWE-1336](https://cwe.mitre.org/data/definitions/1336.html)
+> - **OWASP:** Injection-related weakness; SSTI is not a separate named category in every OWASP Top 10 edition.
+> - **Affected components:** Server-side template engines and applications that dynamically compile templates.
+> - **Potential impact:** Information disclosure, unauthorized operations, or Remote Code Execution (RCE), depending on the engine and configuration.
+> - **Testing environment:** Authorized bug bounty targets and intentionally vulnerable labs.
+> - **Difficulty:** Intermediate; advanced impact analysis requires understanding the template engine and application architecture.
+
+## 1. 📖 Concept & Overview
+
+### 1.1 What is SSTI?
+
+**Technical definition:** Server-Side Template Injection occurs when untrusted input is interpreted as template instructions by a server-side template engine rather than being treated only as data.
+
+**Easy explanation:** Imagine a website that creates a personalized greeting. The website should display your name as normal text. But if the developer accidentally lets your input become part of the template's code, the server may execute template expressions you provide.
+
+A template engine is software that combines a template with data to generate HTML, emails, reports, invoices, and other content.
+
+**Example:**
+
+Suppose an application uses a template to display:
+
+```text
+Hello, Alex!
+```
+
+A harmless expression used for initial SSTI detection is:
+
+```text
+{{7*7}}
+```
+
+Possible observations:
+
+| Input | Output | Interpretation |
+|---|---|---|
+| `Alex` | `Hello, Alex!` | Normal behavior |
+| `{{7*7}}` | `Hello, 49!` | Possible server-side expression evaluation |
+| `{{7*7}}` | `Hello, {{7*7}}!` | Input may be treated as literal text; SSTI is not established |
+| `{{7*7}}` | Error response | Inconclusive; investigate the cause safely |
+
+**Important:** A result of `49` is evidence, not automatic proof of a vulnerability. You must establish that the server-side template engine evaluated the expression.
+
+### 1.2 How SSTI works
+
+```text
+User Input
+    |
+    v
+Application Receives Input
+    |
+    v
+Unsafe Template Construction
+    |
+    v
+Template Engine Evaluates Expression
+    |
+    v
+Server Generates Response
+    |
+    v
+User Observes Evaluated Result
+```
+
+The critical issue is the boundary between **template instructions** and **user-controlled data**.
+
+### 1.3 SSTI vs. XSS vs. SQL Injection
+
+| Feature | SSTI | XSS | SQL Injection |
+|---|---|---|---|
+| Main processing component | Template engine | Browser | Database |
+| Root cause | Untrusted input becomes template code | Untrusted input becomes executable browser content | Untrusted input changes SQL query structure |
+| Typical evidence | Server evaluates an expression | Browser executes injected script | Database query behavior changes |
+| Possible impact | Data exposure, potentially RCE | Browser-side data exposure or actions | Data exposure or unauthorized database operations |
+| Primary fix | Fixed templates and safe data binding | Context-aware output encoding and safe DOM APIs | Parameterized queries |
+
+### 1.4 Common template engines
+
+| Engine | Common ecosystem | Initial syntax clue |
+|---|---|---|
+| Jinja2 | Python applications | `{{ 7*7 }}` |
+| Twig | PHP applications | `{{ 7*7 }}` |
+| FreeMarker | Java applications | `${7*7}` |
+| Thymeleaf | Java applications | Uses multiple context-dependent template expressions |
+| Handlebars | JavaScript ecosystem | `{{...}}` interpolation; behavior differs from arithmetic-capable engines |
+
+These are starting clues, not definitive fingerprints. Engines may share syntax, and the application's configuration affects behavior.
+
+### 1.5 Root causes
+
+Developers commonly introduce SSTI through:
+
+1. **Dynamic template construction:** Concatenating user input into template source.
+2. **Unsafe evaluation APIs:** Compiling a user-controlled string as a template.
+3. **User-defined templates:** Letting users create templates without adequate isolation.
+4. **Overpowered template context:** Exposing sensitive objects, functions, or services to the engine.
+5. **Weak security assumptions:** Believing that filtering special characters alone prevents template evaluation.
+6. **Unsafe content pipelines:** Allowing stored content or third-party data to reach a template compiler.
+
+### 1.6 CWE and OWASP mapping
+
+- **CWE-1336:** Improper Neutralization of Special Elements Used in a Template Engine.
+- **CWE-94:** Improper Control of Generation of Code, potentially relevant to certain code-execution scenarios.
+- **OWASP Top 10:** SSTI is commonly discussed under injection-related weaknesses. Use the classification required by the applicable reporting program.
+
+---
+
+## 2. 🎯 Impact & Severity
+
+### 2.1 Potential security impact
+
+| Impact | Explanation | Evidence required |
+|---|---|---|
+| Expression evaluation | The server evaluates attacker-controlled template expressions | Repeatable server-side evaluation |
+| Information disclosure | Template context exposes non-public information | Demonstrated access to permitted, non-sensitive test data |
+| Unauthorized operations | Exposed application objects allow actions beyond intended permissions | Clearly demonstrated authorization boundary violation |
+| File access | The template environment permits access to filesystem resources | Only validate safely in an authorized lab or approved test environment |
+| Remote Code Execution | Template evaluation can reach server-side execution capabilities | Strong, authorized evidence of actual code execution |
+| Service degradation | Expensive rendering consumes excessive resources | Do not test through disruptive load against production systems |
+
+SSTI does not automatically imply all these impacts. A restricted engine may evaluate simple expressions without allowing file access or code execution.
+
+### 2.2 P1–P4 severity assessment
+
+The following table is an illustrative prioritization guide, not a universal bug bounty severity mapping.
+
+| Priority | Illustrative condition |
+|---|---|
+| **P1 — Critical** | Confirmed, severe server compromise with broad or critical impact |
+| **P2 — High** | Significant server-side access or sensitive information exposure |
+| **P3 — Medium** | Limited, meaningful disclosure or security boundary violation |
+| **P4 — Low** | Limited evaluation behavior with minimal demonstrated security impact |
+
+Use the program's policy, CVSS guidance where applicable, and the actual impact. Do not claim P1 or RCE merely because an expression returns a calculated value.
+
+### 2.3 What makes an SSTI report strong?
+
+A strong finding establishes:
+
+- The affected endpoint and input parameter.
+- That the input reaches a server-side template engine.
+- That the engine evaluates the expression.
+- The relevant security boundary or capability exposed.
+- The practical impact supported by evidence.
+- The conditions under which the behavior can be reproduced.
+
+**Research rule:** Prove the smallest meaningful security impact. Avoid extracting secrets or executing commands on production systems merely to increase a severity rating.
+
+---
+
+## 3. 🔍 How to Find & Test — Methodology
+
+### 3.1 High-value attack surfaces
+
+Look for features that render dynamic content:
+
+- Personalized greetings and profile fields.
+- Email and notification generation.
+- Invoice, PDF, and report creation.
+- CMS themes and page builders.
+- User-editable templates.
+- Custom message or document builders.
+- Server-rendered previews.
+- Features that let users select template names.
+- Applications that process stored or imported content before rendering.
+
+**Remember:** An input appearing in a response does not itself indicate SSTI. It might be ordinary reflection, HTML rendering, or client-side templating.
+
+### 3.2 Step-by-step manual workflow
+
+#### Step 1 — Confirm scope
+
+Before testing, verify the exact domain, endpoint, account requirements, and permitted testing methods. Use a designated lab if the program prohibits injection testing.
+
+#### Step 2 — Map the application's input
+
+Use Burp Suite Proxy or browser Developer Tools to identify:
+
+- URL parameters.
+- Form fields.
+- JSON properties.
+- Stored profile or content fields.
+- Inputs that influence generated reports, emails, or previews.
+
+Record the normal request and response.
+
+#### Step 3 — Establish a baseline
+
+Submit a unique, ordinary marker:
+
+```text
+ssti_probe_123
+```
+
+Check whether it appears in the response and determine where it is rendered.
+
+#### Step 4 — Perform a harmless expression test
+
+In an authorized environment, use a small arithmetic expression compatible with the suspected engine:
+
+```text
+{{7*7}}
+```
+
+Observe whether the output is literal text, an evaluated result, or an error.
+
+#### Step 5 — Compare the results
+
+| Observation | Likely interpretation | Next step |
+|---|---|---|
+| Input appears unchanged | Reflection only, or unsupported syntax | Investigate context and engine clues |
+| Expression becomes `49` in the server response | Possible SSTI | Confirm the server-side evaluation path |
+| A template error occurs | Possible syntax or rendering issue | Examine the response and framework clues |
+| Output changes only in the browser | Possible client-side processing | Inspect the original server response |
+| No visible output change | Inconclusive | Do not label the endpoint vulnerable without stronger evidence |
+
+#### Step 6 — Identify the engine carefully
+
+Use multiple independent indicators:
+
+- Consistent behavior of harmless expressions.
+- Framework or dependency information already available.
+- Error messages observed during normal authorized testing.
+- Application source code, if provided.
+- Official engine documentation.
+
+Do not rely on a single payload or error message to identify an engine conclusively.
+
+#### Step 7 — Validate safely
+
+If the basic behavior is confirmed, use an intentionally vulnerable lab to study the engine's capabilities and security boundaries.
+
+On a live target, remain within the program's explicit rules. Do not attempt destructive actions, access unrelated users' data, or retrieve secrets to prove impact.
+
+#### Step 8 — Collect reproducible evidence
+
+Save:
+
+- Original request.
+- Modified request.
+- Relevant response excerpt.
+- Baseline-versus-test comparison.
+- Exact affected parameter.
+- Steps required to reproduce the behavior.
+- Evidence supporting the severity assessment.
+
+Redact session cookies, authorization headers, personal data, and other secrets before storing or sharing evidence.
+
+### 3.3 Burp Suite checklist
+
+- [ ] Intercept the baseline request.
+- [ ] Identify input that reaches a server-rendered feature.
+- [ ] Send the request to Repeater.
+- [ ] Change one input at a time.
+- [ ] Compare the response against the baseline.
+- [ ] Confirm the behavior is server-side.
+- [ ] Record errors without attempting to force a crash.
+- [ ] Review the bug bounty scope and policy.
+- [ ] Save minimal, reproducible evidence.
+
+### 3.4 Browser Developer Tools checklist
+
+Inspect the **Network** and **Response** views to determine whether the server returned the evaluated result. Also check whether JavaScript changes the displayed content after the response arrives.
+
+A value visible on the page is not necessarily proof that the server evaluated it.
+
+---
+
+## 4. 🚀 Advanced Analysis & Common Defenses
+
+This section explains how to reason about defenses and engine behavior, rather than relying on generic payload tricks.
+
+### 4.1 Common defenses and their limitations
+
+| Defense | Why it may be insufficient |
+|---|---|
+| Blocking `{{` or `${` | Other syntax and processing paths may exist |
+| Character denylist | Input may be transformed or evaluated in a different context |
+| HTML escaping | HTML escaping does not make dynamic template compilation safe |
+| WAF rules | A WAF cannot reliably correct unsafe application design |
+| Hidden error messages | Suppressing errors does not stop expression evaluation |
+| Template sandbox alone | Unsafe objects or custom helpers may expose capabilities outside the intended design |
+
+### 4.2 Five advanced analysis areas
+
+**1. Template syntax differences**
+
+Different engines support different expressions and delimiters. Determine the engine before drawing conclusions.
+
+**2. Rendering context**
+
+Determine whether the input becomes part of template source or is passed as a variable into a fixed template. This distinction is central to SSTI.
+
+**3. Encoding and normalization**
+
+Trace how the application decodes, normalizes, stores, and renders input. Compare what the server actually receives with what it evaluates, without attempting to circumvent production controls.
+
+**4. Indirect data flow**
+
+User input can be stored and rendered later, imported from another system, or passed through several application components. Review the complete data flow rather than testing only query parameters.
+
+**5. Template sandbox boundaries**
+
+In a controlled lab, study which objects and operations are available to the template and whether they exceed the intended permissions. For developers, remove unnecessary capabilities and isolate the rendering process.
+
+### 4.3 False positives to eliminate
+
+| False-positive candidate | How to investigate |
+|---|---|
+| Ordinary reflection | Compare the original marker and expression in the raw server response |
+| Client-side templating | Inspect the network response before browser-side rendering |
+| Generic server error | Check whether the error actually indicates template evaluation |
+| Unsupported syntax | Compare against the engine's documented syntax |
+| Static output containing `49` | Use a unique marker and controlled repeatability checks |
+| Sanitization or transformation | Document the exact input-to-output behavior before concluding |
+
+---
+
+## 5. 💻 Payloads & Cheat Sheet
+
+### 5.1 Harmless detection examples
+
+Use these only on your own application, an authorized target, or a training lab.
+
+| Probe | Purpose | Expected interpretation |
+|---|---|---|
+| `ssti_probe_123` | Baseline marker | Shows ordinary reflection |
+| `{{7*7}}` | Arithmetic evaluation | `49` suggests compatible expression evaluation |
+| `${7*7}` | Alternate syntax | `49` may indicate a compatible engine |
+| `a{{7*7}}b` | Observe evaluation within surrounding text | `a49b` suggests evaluation in that context |
+
+These probes are not universal. Some engines do not support arithmetic in these contexts, and some applications alter input before rendering.
+
+### 5.2 Evidence capture template
+
+```text
+Finding:
+Server-Side Template Injection (SSTI)
+
+Endpoint:
+[Authorized endpoint]
+
+Parameter:
+[Input parameter or field]
+
+Baseline:
+[Ordinary marker and observed result]
+
+Test:
+[Harmless expression]
+
+Observed response:
+[Relevant redacted response excerpt]
+
+Confirmation:
+[Why the evidence demonstrates server-side evaluation]
+
+Impact:
+[Only the impact actually demonstrated]
+
+Scope and authorization:
+[Applicable program or lab]
+```
+
+### 5.3 Quick command and payload safety notes
+
+- Do not run arbitrary operating-system commands on a live target to test SSTI.
+- Do not read application secrets or unrelated users' information.
+- Do not use high-volume fuzzing where it may disrupt a service.
+- Keep intrusive engine-capability testing inside a local or intentionally vulnerable lab.
+- Never store unredacted session tokens in notes or public reports.
+
+---
+
+## 6. 🛠️ Automation & Tools
+
+| Tool | Main use |
+|---|---|
+| **Burp Suite Community / Professional** | Intercept requests, edit inputs, compare responses |
+| **Browser Developer Tools** | Inspect raw server responses and client-side rendering |
+| **OWASP ZAP** | Authorized web application assessment |
+| **PortSwigger Web Security Academy** | Guided, intentionally vulnerable SSTI labs |
+| **OWASP Web Security Testing Guide** | Structured web testing methodology |
+| **Static analysis / source review** | Locate unsafe template construction and evaluation APIs |
+
+### 6.1 Recommended workflow
+
+1. Map relevant input fields and rendering features.
+2. Establish a normal-response baseline.
+3. Test a small set of harmless expressions.
+4. Compare responses and eliminate false positives.
+5. Identify the template engine from multiple indicators.
+6. Validate advanced impact only in an appropriate lab or explicitly approved environment.
+7. Write a report with minimal reproducible evidence.
+
+### 6.2 Automation limitations
+
+Automated scanners can identify suspicious syntax or response differences, but they may not prove:
+
+- That the server evaluated the expression.
+- Which engine is in use.
+- Whether a security boundary was crossed.
+- Whether RCE is possible.
+- Whether the result is reportable under a program's rules.
+
+**Use automation to find candidates, not to replace technical verification.**
+
+---
+
+## 7. 🛡️ Remediation & Developer Fix
+
+### 7.1 Core remediation principles
+
+1. Keep template source code fixed and trusted.
+2. Pass user-controlled values as data through the framework's supported variable-binding interface.
+3. Avoid compiling user-controlled strings into templates.
+4. Restrict template selection to an explicit server-side allowlist.
+5. Expose only the minimum objects and functions needed by the template.
+6. Use a supported sandbox if users genuinely need to author templates.
+7. Isolate rendering with least privilege and suitable filesystem, network, and resource restrictions.
+8. Keep the template engine and dependencies updated.
+9. Add regression tests that verify user input remains data rather than becoming template code.
+
+### 7.2 Vulnerable vs. safer Python example
+
+**Vulnerable pattern:**
+
+```python
+from flask import request, render_template_string
+
+@app.route("/greet")
+def greet():
+    name = request.args.get("name", "")
+    return render_template_string("Hello " + name)
+```
+
+**Why it is risky:** The user-controlled value is concatenated into the template source. If the input contains template syntax, the engine may evaluate it.
+
+**Safer pattern:**
+
+```python
+from flask import request, render_template
+
+@app.route("/greet")
+def greet():
+    name = request.args.get("name", "")
+    return render_template("greet.html", name=name)
+```
+
+`templates/greet.html`:
+
+```html
+<h1>Hello, {{ name }}</h1>
+```
+
+Here, the template source is fixed and the name is passed as data. Keep the framework's appropriate autoescaping enabled.
+
+**Note:** Safe variable binding prevents this specific unsafe construction pattern; it does not automatically secure every other rendering path in the application.
+
+### 7.3 Secure architecture
+
+```text
+UNSAFE DESIGN
+Untrusted Input
+      |
+      v
+Concatenate into Template Source
+      |
+      v
+Template Engine
+      |
+      v
+Possible Expression Evaluation
+
+
+SAFER DESIGN
+Fixed Trusted Template + Untrusted Data
+                    |
+                    v
+             Template Engine
+                    |
+                    v
+       Context-Appropriate Escaping
+                    |
+                    v
+             Rendered Output
+```
+
+### 7.4 Code review targets
+
+For Python/Jinja2, review:
+
+- `render_template_string()`
+- `Environment.from_string()`
+- Dynamic template string construction
+- Custom filters, globals, and exposed objects
+
+These APIs are not automatically vulnerabilities. The concern is whether untrusted input controls the template source or gains access to unintended capabilities.
+
+For other languages, review equivalent APIs that compile strings into templates, dynamically load template files, or expose powerful objects to rendering logic.
+
+### 7.5 Regression testing
+
+A good regression test should confirm:
+
+- User-provided template-like text is rendered as data.
+- User input cannot alter the trusted template source.
+- Context-appropriate escaping remains enabled.
+- Untrusted users cannot select arbitrary template files.
+- The rendering process has only the permissions it needs.
+
+---
+
+## 8. 🧪 Lab Roadmap — Beginner to Advanced
+
+Practice only in intentionally vulnerable labs or environments where testing is authorized.
+
+### Stage 1 — Beginner
+
+**Goal:** Understand template evaluation.
+
+- [PortSwigger — Server-Side Template Injection](https://portswigger.net/web-security/server-side-template-injection)
+- [PortSwigger — Basic SSTI, Code Context Lab](https://portswigger.net/web-security/server-side-template-injection/exploiting/lab-server-side-template-injection-basic-code-context)
+
+Tasks:
+
+- [ ] Explain what a template engine does.
+- [ ] Distinguish reflection from expression evaluation.
+- [ ] Capture baseline and test responses.
+- [ ] Explain why arithmetic evaluation does not automatically prove RCE.
+
+### Stage 2 — Intermediate
+
+**Goal:** Understand the rendering context and identify false positives.
+
+- Compare engine syntax using official documentation.
+- Investigate server-side versus client-side rendering.
+- Examine how stored input reaches a rendering feature.
+- Document why a finding is reproducible.
+
+Tasks:
+
+- [ ] Identify multiple indicators for an engine.
+- [ ] Record false-positive checks.
+- [ ] Explain the unsafe code/data boundary.
+- [ ] Write a clear proof-of-concept report.
+
+### Stage 3 — Advanced
+
+**Goal:** Understand impact and secure design.
+
+- Study engine security documentation.
+- Review sandboxing and exposed template objects.
+- Examine a deliberately vulnerable application locally.
+- Compare vulnerable and corrected implementations.
+- Add regression tests for the fixed application.
+
+Tasks:
+
+- [ ] Map the template data flow.
+- [ ] Explain which capabilities are exposed and why.
+- [ ] Propose least-privilege rendering controls.
+- [ ] Verify that the corrected application treats input as data.
+
+---
+
+## 9. 📝 Bug Bounty Report Template
+
+Use this template when the behavior is confirmed and the program permits reporting.
+
+### Title
+
+`Server-Side Template Injection (SSTI) in [Feature / Endpoint]`
+
+### Summary
+
+The application processes user-controlled input as server-side template instructions in the affected feature. This behavior allows template expressions to be evaluated by the server. The final severity depends on the capabilities exposed and the demonstrated impact.
+
+### Affected Asset
+
+- **Asset:** [In-scope host]
+- **Endpoint:** [Affected route]
+- **Parameter:** [Affected input]
+- **Account requirements:** [Required role or account state]
+
+### Steps to Reproduce
+
+1. Navigate to the affected feature.
+2. Submit the baseline marker.
+3. Submit the harmless test expression permitted by the program.
+4. Compare the server response with the baseline.
+5. Record the repeatable result.
+
+### Evidence
+
+Include the relevant redacted request and response, a short explanation of the evaluated output, and any other evidence needed to reproduce the behavior.
+
+### Security Impact
+
+Describe the actual, verified consequence. Do not claim file access, sensitive-data exposure, or RCE unless the evidence supports it.
+
+### Root Cause
+
+The application allows user-controlled content to enter a template compilation or evaluation path instead of passing the content solely as data.
+
+### Remediation
+
+Use a fixed trusted template, pass untrusted input through safe variable binding, limit the rendering context, and restrict template selection and execution capabilities.
+
+---
+
+## 10. 🎤 Interview Questions & Answers
+
+**Q1. What is SSTI?**
+
+SSTI is a vulnerability where user-controlled input is interpreted as template instructions by a server-side template engine instead of being treated as data.
+
+**Q2. What is the difference between SSTI and XSS?**
+
+SSTI occurs in server-side template processing, while XSS involves executable content being interpreted by a victim's browser.
+
+**Q3. Does SSTI always lead to RCE?**
+
+No. The impact depends on the engine, its configuration, the available objects and functions, and the application's execution environment.
+
+**Q4. What is the root cause of SSTI?**
+
+A common root cause is constructing template source using untrusted input or compiling user-controlled strings as templates.
+
+**Q5. How do you initially test for SSTI?**
+
+In an authorized environment, establish a baseline, use a harmless expression, compare the server response, and rule out client-side evaluation and ordinary reflection.
+
+**Q6. How do you identify a template engine?**
+
+Use multiple indicators, application framework clues, observed behavior, source code when available, and official documentation.
+
+**Q7. Is HTML escaping enough to prevent SSTI?**
+
+No. HTML escaping helps with output contexts but does not make it safe to compile untrusted input as template source.
+
+**Q8. What is the primary remediation?**
+
+Keep templates fixed and pass user input as data using the framework's safe variable-binding mechanisms.
+
+**Q9. Why can a sandbox be insufficient?**
+
+A sandbox may still expose dangerous objects or capabilities. Use least privilege, restrict the rendering context, and isolate the process.
+
+**Q10. What makes an SSTI report valid?**
+
+Reproducible evidence of server-side evaluation, clear root cause, a demonstrated security impact where applicable, and compliance with the program's scope.
+
+---
+
+## 11. 🧠 Must-Remember Cheat Sheet
+
+| Concept | Remember |
+|---|---|
+| SSTI | Untrusted input is evaluated as template code |
+| Primary CWE | CWE-1336 |
+| Detection | Baseline + harmless expression + server-side confirmation |
+| Reflection | Not sufficient evidence |
+| Engine identification | Use multiple indicators |
+| RCE | Possible, not guaranteed |
+| Root cause | Unsafe template construction or evaluation |
+| Primary fix | Fixed template + user input as data |
+| Defense in depth | Least privilege, sandboxing, isolation, updates |
+| Reporting | Reproducible proof and impact supported by evidence |
+
+### Final mental model
+
+**SSTI is fundamentally a code-versus-data separation failure in server-side template rendering.**
+
+A strong researcher does not just find an expression that evaluates. They establish where the evaluation happens, understand the application's security boundary, validate impact responsibly, eliminate false positives, and explain how the developer can fix the root cause.
+
+### References
+
+- [PortSwigger — SSTI Learning Material](https://portswigger.net/web-security/server-side-template-injection)
+- [PortSwigger — SSTI Research](https://portswigger.net/research/server-side-template-injection)
+- [OWASP — SSTI Prevention Cheat Sheet](https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/Server_Side_Template_Injection_Prevention_Cheat_Sheet.md)
+- [MITRE — CWE-1336](https://cwe.mitre.org/data/definitions/1336.html)
+- [OWASP Web Security Testing Guide](https://owasp.org/www-project-web-security-testing-guide/)
+
+
+
+**Note:** No static note can guarantee a universal 10/10 for every target. Treat this as a comprehensive SSTI learning and testing reference, then add lab-specific observations as you complete each exercise.
